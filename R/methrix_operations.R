@@ -29,11 +29,13 @@ get_region_summary <- function(m, regions = NULL, type = "M", how = "mean",
 
     start_proc_time <- proc.time()
 
-    target_regions <- cast_ranges(regions)
+    target_regions <- cast_ranges(regions, set.key = FALSE)
     # Add a unique id for every target range (i.e, rows)
-    target_regions[, `:=`(rid, paste0("rid_", seq_len(nrow(target_regions))))]
-
-
+    target_regions[, `:=`(rid, seq_len(nrow(target_regions)))]
+    data.table::setDT(x = target_regions, key = c("chr", "start", "end"))
+    target_regions[, `:=`(yid, paste0("yid_", seq_len(nrow(target_regions))))]
+    
+    
     r_dat <- data.table::as.data.table(rowData(x = m))
     r_dat[, `:=`(chr, as.character(chr))]
     r_dat[, `:=`(end, start + 1)]
@@ -51,9 +53,9 @@ get_region_summary <- function(m, regions = NULL, type = "M", how = "mean",
         return(NULL)
     }
 
-    overlap_indices[, `:=`(yid, paste0("rid_", yid))]
+    overlap_indices[, `:=`(yid, paste0("yid_", yid))]
     n_overlap_cpgs <- overlap_indices[, .N, yid]
-    colnames(n_overlap_cpgs) <- c("rid", "n_overlap_CpGs")
+    colnames(n_overlap_cpgs) <- c("yid", "n_overlap_CpGs")
 
 
     if (type == "M") {
@@ -86,9 +88,11 @@ get_region_summary <- function(m, regions = NULL, type = "M", how = "mean",
         output <- dat[, lapply(.SD, sum, na.rm = na_rm), by = yid, .SDcols = rownames(colData(m))]
     }
 
-    output <- merge(target_regions, output, by.x = "rid", by.y = "yid",
+    output <- merge(target_regions, output, by.x = "yid", by.y = "yid",
         all.x = TRUE)
-    output <- merge(n_overlap_cpgs, output, by = "rid")
+    output <- merge(n_overlap_cpgs, output, by = "yid")
+    setDT(output, key=c("rid"))
+    output[, `:=`(yid, NULL)]
     output[, `:=`(rid, NULL)]
 
 
@@ -132,29 +136,30 @@ order_by_sd <- function(m) {
 #' @param regions genomic regions to subset by. Could be a data.table with 3 columns (chr, start, end) or a \code{GenomicRanges} object
 #' @param contigs chromosome names to subset by
 #' @param samples sample names to subset by
+#' @param overlap_type defines the type of the overlap of the CpG sites with the target region. Default value is `within`. For detailed description,
+#' see the \code{foverlaps} function of the \code{\link{data.table}} package.
 #' @examples
 #' data('methrix_data')
 #' #Subset to chromosome 1
 #' subset_methrix(methrix_data, contigs = 'chr21')
 #' @return An object of class \code{\link{methrix}}
 #' @export
-subset_methrix <- function(m, regions = NULL, contigs = NULL, samples = NULL) {
+subset_methrix <- function(m, regions = NULL, contigs = NULL, samples = NULL, overlap_type="within") {
 
     if (!is(m, "methrix")){
         stop("A valid methrix object needs to be supplied.")
     }
 
     r_dat <- data.table::as.data.table(rowData(m))
-
     if (!is.null(regions)) {
         message("-Subsetting by genomic regions")
 
         target_regions <- cast_ranges(regions)
 
         r_dat[, `:=`(end, start + 1)]
-        data.table::setDT(x = r_dat, key = c("chr", "start", "end"))
+        #data.table::setDT(x = r_dat, key = c("chr", "start", "end"))
         overlaps <- data.table::foverlaps(x = r_dat, y = target_regions,
-            type = "within", nomatch = NULL, which = TRUE)
+            type = overlap_type, nomatch = NULL, which = TRUE)
         if (nrow(overlaps) == 0) {
             stop("Subsetting resulted in zero entries")
         }
@@ -193,6 +198,8 @@ subset_methrix <- function(m, regions = NULL, contigs = NULL, samples = NULL) {
 #' @param m \code{\link{methrix}} object
 #' @param cov_thr minimum coverage required to call a loci covered
 #' @param min_samples At-least these many samples should have a loci with coverage >= \code{cov_thr}
+#' @param group a column name from sample annotation that defines groups. In this case, the number of min_samples will be 
+#' tested group-wise. 
 #' @importFrom methods is as new
 #' @examples
 #' data('methrix_data')
@@ -200,10 +207,10 @@ subset_methrix <- function(m, regions = NULL, contigs = NULL, samples = NULL) {
 #' coverage_filter(m = methrix_data, cov_thr = 1, min_samples = 3)
 #' @return An object of class \code{\link{methrix}}
 #' @export
-coverage_filter <- function(m, cov_thr = 1, min_samples = 1) {
+coverage_filter <- function(m, cov_thr = 1, min_samples = 1, group = NULL) {
 
     start_proc_time <- proc.time()
-    V1 <- . <- NULL
+    V1 <- . <- col2 <- Count2 <- i.to <- NULL
     if (!is(m, "methrix")){
         stop("A valid methrix object needs to be supplied.")
     }
@@ -211,16 +218,41 @@ coverage_filter <- function(m, cov_thr = 1, min_samples = 1) {
     if (!(is.numeric(cov_thr) & is.numeric(min_samples))){
         stop("cov_thr and min_samples variables are not numeric.")
     }
+    
+    if (!is.null(group) && !(group %in% colnames(m@colData))){
+        stop(paste("The column name ", group, " can't be found in colData. Please provid a valid group column."))
+    } 
+    
 
     res <- data.table::as.data.table(which(get_matrix(m = m, type = "C") >=
         cov_thr, arr.ind = TRUE))
 
     if (is_h5(m)) {
-        res <- res[, .(Count = (.N)), by = V1]
-        row_idx <- res[res$Count >= min_samples, V1]
+        if (!is.null(group)){
+            res[.(V2 = unique(res$V2), to = m@colData[unique(res$V2), group]), on = "V2", col2 := i.to]
+            res <- res[, .(Count = (.N)), by = .(V1, col2)]
+            row_idx <- res[res$Count >= min_samples, V1, by = col2]
+            row_idx <- row_idx[, .(Count2 = (.N)), by = V1]
+            row_idx <- row_idx[Count2==length(unique(m@colData[,group])),V1]
+            row_idx[order(row_idx, decreasing = F)]
+        } else {
+            res <- res[, .(Count = (.N)), by = V1]
+            setDT(res, key="V1")
+            row_idx <- res[res$Count >= min_samples, V1]
+        }
+        
     } else {
-        res <- res[, .(Count = (.N)), by = row]
-        row_idx <- res[res$Count >= min_samples, row]
+        if (!is.null(group)){
+            res[.(col = unique(res$col), to = m@colData[unique(res$col), group]), on = "col", col2 := i.to]
+            res <- res[, .(Count = (.N)), by = .(row, col2)]
+            row_idx <- res[res$Count >= min_samples, row, by = col2]
+            row_idx <- row_idx[, .(Count2 = (.N)), by = row]
+            row_idx <- row_idx[Count2==length(unique(res$col)),row]
+        } else {
+            res <- res[, .(Count = (.N)), by = row]
+            setDT(res, key="row")
+            row_idx <- res[res$Count >= min_samples, row]
+        }
     }
 
     gc()
