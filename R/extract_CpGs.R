@@ -48,9 +48,10 @@ extract_CPGs = function(ref_genome = NULL) {
         ref_build = NA
     }
     
-    chrom_sizes = data.table::data.table(contig = standardChromosomes(ref_genome),
-        length = seqlengths(x = ref_genome)[names(seqlengths(x = ref_genome)) %in% standardChromosomes(ref_genome)])
-    chrs = standardChromosomes(ref_genome)
+    chrom_sizes = data.table::data.table(
+        contig = GenomeInfoDb::standardChromosomes(ref_genome),
+        length = seqlengths(x = ref_genome)[names(seqlengths(x = ref_genome)) %in% GenomeInfoDb::standardChromosomes(ref_genome)])
+    chrs = GenomeInfoDb::standardChromosomes(ref_genome)
 
     message("-Extracting CpGs")
 
